@@ -1,0 +1,151 @@
+name: Build OpenWrt amd64 every 3 days
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lede-amd64-build
+  cancel-in-progress: false
+
+env:
+  TZ: UTC
+
+jobs:
+  gate:
+    name: Check 3-day schedule
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.gate.outputs.should_build }}
+      tag: ${{ steps.gate.outputs.tag }}
+    steps:
+      - name: Decide whether to build
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            days=$(( $(date -u +%s) / 86400 ))
+            if [ $(( days % 3 )) -eq 0 ]; then
+              echo "should_build=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "should_build=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+          echo "tag=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build x86/64 image
+    needs: gate
+    if: needs.gate.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ccache clang flex bison g++ gawk gcc-multilib \
+            g++-multilib gettext git libncurses5-dev libssl-dev libelf-dev \
+            liblzma-dev libsqlite3-dev python3 python3-pip rsync unzip \
+            zlib1g-dev file wget curl xsltproc perl
+
+      - name: Cache downloads and ccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            dl
+            .ccache
+          key: lede-amd64-${{ github.sha }}
+          restore-keys: |
+            lede-amd64-
+
+      - name: Update feeds
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do
+            ./scripts/feeds update -a && break
+            echo "feeds update failed, retry $i/3"
+            sleep 15
+          done
+          ./scripts/feeds install -a
+
+      - name: Configure x86/64 target
+        run: |
+          set -euo pipefail
+          cat > .config <<'EOF'
+          CONFIG_TARGET_x86=y
+          CONFIG_TARGET_x86_64=y
+          CONFIG_TARGET_x86_64_DEVICE_generic=y
+          CONFIG_TARGET_IMAGES_GZIP=y
+          CONFIG_CCACHE=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_LUCI_LANG_zh_Hans=y
+          CONFIG_PACKAGE_kmod-virtio-net=y
+          CONFIG_PACKAGE_kmod-e1000e=y
+          EOF
+          make defconfig
+          echo "Selected target:"
+          grep -E '^CONFIG_TARGET_(x86|x86_64|x86_64_DEVICE_generic)=' .config
+
+      - name: Download packages
+        run: |
+          set -euo pipefail
+          make download -j8 || make download -j1
+
+      - name: Compile
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" || make -j1 V=s
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd bin/targets/x86/64
+          find . -maxdepth 1 -type f ! -name 'sha256sums.txt' -printf '%f\n' | sort | xargs sha256sum > sha256sums.txt
+
+      - name: Upload Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-amd64-${{ needs.gate.outputs.tag }}
+          path: bin/targets/x86/64/*
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.gate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --target "${{ github.sha }}" \
+            --title "OpenWrt amd64 $TAG" \
+            --notes "Automated build of Lean's LEDE x86/64. Triggered by ${{ github.event_name }} at $(date -u +'%Y-%m-%d %H:%M:%S UTC')." \
+            bin/targets/x86/64/*
+
+      - name: Delete releases older than 30 days
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          jqexpr=".[] | select(.created_at < \"$cutoff\") | .id"
+          gh api --paginate "repos/${{ github.repository }}/releases" --jq "$jqexpr" \
+          | while read -r id; do
+              if [ -n "$id" ]; then
+                gh api -X DELETE "repos/${{ github.repository }}/releases/$id" >/dev/null || true
+              fi
+            done
