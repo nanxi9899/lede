@@ -1,4 +1,4 @@
-name: Build OpenWrt amd64 on upstream changes
+name: Build OpenWrt amd64 (dual kernel) on upstream changes
 
 on:
   schedule:
@@ -51,11 +51,19 @@ jobs:
           echo "tag=$(date -u +%Y%m%d-%H%M%S)-${upstream_sha:0:7}" >> "$GITHUB_OUTPUT"
 
   build:
-    name: Build x86/64 image
+    name: Build x86/64 (kernel ${{ matrix.kernel_label }})
     needs: gate
     if: needs.gate.outputs.should_build == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kernel_label: stable-6.18
+            testing_kernel: "n"
+          - kernel_label: testing-7.3
+            testing_kernel: "y"
     steps:
       - name: Checkout upstream source
         uses: actions/checkout@v4
@@ -80,8 +88,9 @@ jobs:
           path: |
             dl
             .ccache
-          key: lede-amd64-${{ needs.gate.outputs.upstream_sha }}
+          key: lede-amd64-${{ matrix.kernel_label }}-${{ needs.gate.outputs.upstream_sha }}
           restore-keys: |
+            lede-amd64-${{ matrix.kernel_label }}-
             lede-amd64-
 
       - name: Prefetch erofs-utils source
@@ -129,7 +138,7 @@ jobs:
               p.write_text(s)
           PY
 
-      - name: Configure x86/64 target
+      - name: Configure x86/64 target (kernel ${{ matrix.kernel_label }})
         run: |
           set -euo pipefail
           cat > .config <<'EOF'
@@ -142,17 +151,22 @@ jobs:
           CONFIG_LUCI_LANG_zh_Hans=y
           CONFIG_PACKAGE_kmod-virtio-net=y
           CONFIG_PACKAGE_kmod-e1000e=y
+          CONFIG_TESTING_KERNEL=${{ matrix.testing_kernel }}
           EOF
           make defconfig
           echo "Selected target:"
           grep -E '^CONFIG_TARGET_(x86|x86_64|x86_64_DEVICE_generic)=' .config
+          echo "Selected kernel (TESTING_KERNEL=${{ matrix.testing_kernel }}):"
+          grep -E '^CONFIG_TESTING_KERNEL=' .config || true
+          echo "Effective LINUX_VERSION:"
+          make --no-print-directory -s kernelversion 2>/dev/null || true
 
       - name: Download packages
         run: |
           set -euo pipefail
           make download -j8 || make download -j1
 
-      - name: Compile
+      - name: Compile kernel ${{ matrix.kernel_label }}
         run: |
           set -euo pipefail
           make -j"$(nproc)" || make -j1 V=s
@@ -166,7 +180,7 @@ jobs:
       - name: Upload Actions artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-amd64-${{ needs.gate.outputs.tag }}
+          name: openwrt-amd64-${{ matrix.kernel_label }}-${{ needs.gate.outputs.tag }}
           path: bin/targets/x86/64/*
           retention-days: 90
           if-no-files-found: error
@@ -174,16 +188,22 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.gate.outputs.tag }}
+          TAG: ${{ needs.gate.outputs.tag }}-${{ matrix.kernel_label }}
           UPSTREAM_SHA: ${{ needs.gate.outputs.upstream_sha }}
         run: |
           set -euo pipefail
           gh release create "$TAG" \
             --target "${{ github.sha }}" \
-            --title "OpenWrt amd64 $TAG" \
-            --notes "Automated build of Lean's LEDE x86/64. Upstream: $UPSTREAM_SHA. Triggered by ${{ github.event_name }} at $(date -u +'%Y-%m-%d %H:%M:%S UTC')." \
+            --title "OpenWrt amd64 [${{ matrix.kernel_label }}] $TAG" \
+            --notes "Automated build of Lean's LEDE x86/64 with kernel ${{ matrix.kernel_label }}. Upstream: $UPSTREAM_SHA. Triggered by ${{ github.event_name }} at $(date -u +'%Y-%m-%d %H:%M:%S UTC')." \
             bin/targets/x86/64/*
 
+  finalize:
+    name: Finalize
+    needs: [gate, build]
+    if: needs.gate.outputs.should_build == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
       - name: Record built upstream SHA
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -216,7 +236,6 @@ jobs:
           echo "Recorded upstream SHA: $UPSTREAM_SHA"
 
       - name: Delete releases older than 30 days
-        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
