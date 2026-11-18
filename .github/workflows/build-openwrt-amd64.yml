@@ -1,8 +1,8 @@
-name: Build OpenWrt amd64 every 3 days
+name: Build OpenWrt amd64 on upstream changes
 
 on:
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -17,10 +17,11 @@ env:
 
 jobs:
   gate:
-    name: Check 3-day schedule
+    name: Check upstream changes
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.gate.outputs.should_build }}
+      upstream_sha: ${{ steps.gate.outputs.upstream_sha }}
       tag: ${{ steps.gate.outputs.tag }}
     steps:
       - name: Decide whether to build
@@ -28,17 +29,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          upstream_sha=$(curl -fsSL --http1.1 --retry 5 --retry-delay 2 --connect-timeout 15 --max-time 60 \
+            https://api.github.com/repos/coolsnowwolf/lede/commits/master \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')
+          last_sha=$(curl -fsSL --http1.1 --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 60 \
+            "https://raw.githubusercontent.com/${{ github.repository }}/master/.github/last-built-sha" || true)
+          last_sha=$(printf '%s' "$last_sha" | tr -d '[:space:]')
+
+          if [ -z "$last_sha" ] || [ "$upstream_sha" != "$last_sha" ]; then
+            should_build=true
           else
-            days=$(( $(date -u +%s) / 86400 ))
-            if [ $(( days % 3 )) -eq 0 ]; then
-              echo "should_build=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "should_build=false" >> "$GITHUB_OUTPUT"
-            fi
+            should_build=false
           fi
-          echo "tag=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            should_build=true
+          fi
+
+          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+          echo "tag=$(date -u +%Y%m%d-%H%M%S)-${upstream_sha:0:7}" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build x86/64 image
@@ -47,9 +57,11 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
     steps:
-      - name: Checkout source
+      - name: Checkout upstream source
         uses: actions/checkout@v4
         with:
+          repository: coolsnowwolf/lede
+          ref: ${{ needs.gate.outputs.upstream_sha }}
           fetch-depth: 1
 
       - name: Install build dependencies
@@ -68,7 +80,7 @@ jobs:
           path: |
             dl
             .ccache
-          key: lede-amd64-${{ github.sha }}
+          key: lede-amd64-${{ needs.gate.outputs.upstream_sha }}
           restore-keys: |
             lede-amd64-
 
@@ -163,13 +175,45 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.gate.outputs.tag }}
+          UPSTREAM_SHA: ${{ needs.gate.outputs.upstream_sha }}
         run: |
           set -euo pipefail
           gh release create "$TAG" \
             --target "${{ github.sha }}" \
             --title "OpenWrt amd64 $TAG" \
-            --notes "Automated build of Lean's LEDE x86/64. Triggered by ${{ github.event_name }} at $(date -u +'%Y-%m-%d %H:%M:%S UTC')." \
+            --notes "Automated build of Lean's LEDE x86/64. Upstream: $UPSTREAM_SHA. Triggered by ${{ github.event_name }} at $(date -u +'%Y-%m-%d %H:%M:%S UTC')." \
             bin/targets/x86/64/*
+
+      - name: Record built upstream SHA
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_SHA: ${{ needs.gate.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${{ github.repository }}/contents/.github/last-built-sha"
+          file_sha=$(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" "$api" \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("sha",""))' || true)
+          python3 - "$UPSTREAM_SHA" "$file_sha" <<'PY' > /tmp/last_sha_payload.json
+          import base64
+          import json
+          import sys
+
+          sha = sys.argv[1]
+          existing = sys.argv[2]
+          obj = {
+              "message": "ci: record upstream build " + sha,
+              "content": base64.b64encode((sha + "\n").encode()).decode(),
+              "branch": "master",
+          }
+          if existing:
+              obj["sha"] = existing
+          print(json.dumps(obj))
+          PY
+          curl -fsS -X PUT -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            "$api" --data-binary @/tmp/last_sha_payload.json >/dev/null
+          echo "Recorded upstream SHA: $UPSTREAM_SHA"
 
       - name: Delete releases older than 30 days
         if: always()
