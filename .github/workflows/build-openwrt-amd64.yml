@@ -301,9 +301,9 @@ jobs:
           UPSTREAM_SHA: ${{ needs.gate.outputs.upstream_sha }}
         run: |
           set -euo pipefail
-          # Only publish flashable firmware images; skip buildinfo/manifest/json/checksums
+          # Only publish flashable firmware images; skip .bin, buildinfo/manifest/json/checksums
           mapfile -t assets < <(find bin/targets/x86/64 -maxdepth 1 -type f \
-            \( -name '*.bin' -o -name '*.img' -o -name '*.img.gz' -o -name '*.vmdk' \
+            \( -name '*.img' -o -name '*.img.gz' -o -name '*.vmdk' \
                -o -name '*.vhd' -o -name '*.vhdx' -o -name '*.qcow2' -o -name '*.ova' \) \
             | sort)
           echo "Release assets (${#assets[@]}):"
