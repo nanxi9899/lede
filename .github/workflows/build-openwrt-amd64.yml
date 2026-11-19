@@ -295,6 +295,7 @@ jobs:
           if-no-files-found: error
 
       - name: Create GitHub Release
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.gate.outputs.tag }}-${{ matrix.kernel_label }}
@@ -302,6 +303,7 @@ jobs:
         run: |
           set -euo pipefail
           gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
             --title "LOVEWRT amd64 [${{ matrix.kernel_label }}] $TAG" \
             --notes "LOVEWRT x86/64 firmware (kernel ${{ matrix.kernel_label }}, OpenClash built-in), based on Lean's LEDE. Upstream: $UPSTREAM_SHA. Triggered by ${{ github.event_name }} at $(date -u +'%Y-%m-%d %H:%M:%S UTC')." \
