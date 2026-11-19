@@ -294,31 +294,59 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-      - name: Create GitHub Release
+  publish:
+    name: Publish unified firmware Release
+    needs: [gate, build]
+    if: needs.gate.outputs.should_build == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: LOVEWRT-amd64-*
+          path: artifacts
+
+      - name: Merge images and create one Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.gate.outputs.tag }}-${{ matrix.kernel_label }}
+          TAG: ${{ needs.gate.outputs.tag }}
           UPSTREAM_SHA: ${{ needs.gate.outputs.upstream_sha }}
         run: |
           set -euo pipefail
-          # Only publish flashable firmware images; skip .bin, buildinfo/manifest/json/checksums
-          mapfile -t assets < <(find bin/targets/x86/64 -maxdepth 1 -type f \
-            \( -name '*.img' -o -name '*.img.gz' -o -name '*.vmdk' \
-               -o -name '*.vhd' -o -name '*.vhdx' -o -name '*.qcow2' -o -name '*.ova' \) \
-            | sort)
-          echo "Release assets (${#assets[@]}):"
-          printf '  %s\n' "${assets[@]}"
+          mkdir -p out
+          for d in artifacts/LOVEWRT-amd64-*; do
+            [ -d "$d" ] || continue
+            name=$(basename "$d")
+            kernel=$(printf '%s' "$name" | sed -E 's/^LOVEWRT-amd64-(.*)-[0-9]{8}-[0-9]{6}-[0-9a-f]+$/\1/')
+            echo "Processing kernel=$kernel from $name"
+            find "$d" -maxdepth 1 -type f -print0 | while IFS= read -r -d '' f; do
+              base=$(basename "$f")
+              case "$base" in
+                *.img.gz) new="${base%.img.gz}-${kernel}.img.gz" ;;
+                *.img)    new="${base%.img}-${kernel}.img" ;;
+                *.vmdk)   new="${base%.vmdk}-${kernel}.vmdk" ;;
+                *.vhd)    new="${base%.vhd}-${kernel}.vhd" ;;
+                *.vhdx)   new="${base%.vhdx}-${kernel}.vhdx" ;;
+                *.qcow2)  new="${base%.qcow2}-${kernel}.qcow2" ;;
+                *.ova)    new="${base%.ova}-${kernel}.ova" ;;
+                *)        continue ;;
+              esac
+              cp "$f" "out/$new"
+            done
+          done
+          echo "=== firmware images to publish ==="
+          ls -lh out/
           gh release create "$TAG" \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
-            --title "LOVEWRT amd64 [${{ matrix.kernel_label }}] $TAG" \
-            --notes "LOVEWRT x86/64 firmware (kernel ${{ matrix.kernel_label }}, OpenClash built-in), based on Lean's LEDE. Upstream: $UPSTREAM_SHA. Triggered by ${{ github.event_name }} at $(date -u +'%Y-%m-%d %H:%M:%S UTC')." \
-            "${assets[@]}"
+            --title "LOVEWRT x86/64 firmware (dual kernel, 4 images)" \
+            --notes "LOVEWRT x86/64 firmware - 4 images (kernel 7.3 testing + 6.18 stable), OpenClash built-in, based on Lean's LEDE. Files suffixed with kernel version. Upstream: $UPSTREAM_SHA." \
+            out/*
 
   finalize:
     name: Finalize
-    needs: [gate, build]
-    if: needs.gate.outputs.should_build == 'true' && needs.build.result == 'success'
+    needs: [gate, build, publish]
+    if: needs.gate.outputs.should_build == 'true' && needs.build.result == 'success' && needs.publish.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Record built upstream SHA
