@@ -222,6 +222,19 @@ jobs:
           f = d / "99_lovewrt-brand"
           f.write_text("\n".join(uci_lines) + "\n")
           f.chmod(0o755)
+          # 强制发行名为 LOVEWRT：改 version.mk 的 fallback 默认，
+          # 不依赖 CONFIG_VERSION_DIST（后者在某些配置下会被 defconfig 清掉）
+          vm = Path("include/version.mk")
+          vs = vm.read_text()
+          vs = vs.replace(
+              "VERSION_DIST:=$(if $(VERSION_DIST),$(VERSION_DIST),OpenWrt)",
+              "VERSION_DIST:=$(if $(VERSION_DIST),$(VERSION_DIST),LOVEWRT)",
+          )
+          vs = vs.replace(
+              "VERSION_MANUFACTURER:=$(if $(VERSION_MANUFACTURER),$(VERSION_MANUFACTURER),OpenWrt)",
+              "VERSION_MANUFACTURER:=$(if $(VERSION_MANUFACTURER),$(VERSION_MANUFACTURER),LOVEWRT)",
+          )
+          vm.write_text(vs)
           print("Branding applied: LOVEWRT")
           PY
 
@@ -254,8 +267,8 @@ jobs:
           grep -E '^CONFIG_TARGET_(x86|x86_64|x86_64_DEVICE_generic)=' .config
           echo "OpenClash selection:"
           grep -E '^CONFIG_PACKAGE_luci-app-openclash=' .config || echo "WARNING: OpenClash not selected"
-          echo "Branding:"
-          grep -E '^CONFIG_VERSION(_OPT|_DIST)=' .config
+          echo "Branding (version.mk fallback enforced in previous step):"
+          grep -E '^CONFIG_VERSIONOPT=|^CONFIG_VERSION_DIST=' .config || echo "note: VERSIONOPT not in .config; version.mk fallback ensures LOVEWRT"
 
       - name: Download packages
         run: |
