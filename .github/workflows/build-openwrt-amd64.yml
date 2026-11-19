@@ -1,4 +1,4 @@
-name: Build RRWRT amd64 (dual kernel + OpenClash) on upstream changes
+name: Build LOVEWRT amd64 (dual kernel + OpenClash) on upstream changes
 
 on:
   schedule:
@@ -193,38 +193,36 @@ jobs:
           print("patched json_overview_image_info.py")
           PY
 
-      - name: Brand firmware as RRWRT
+      - name: Brand firmware as LOVEWRT
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          # 自定义开机 banner，%D 会被替换为 VERSION_DIST=RRWRT
+          # 自定义开机 banner，%D 会被替换为 VERSION_DIST=LOVEWRT
           banner_lines = [
-              "   ____   ____   ____   __  __   ____",
-              "  |  _ \\ |  _ \\ |  _ \\ |  \\/  | |  _ \\",
-              "  | |_) || |_) || |_) || |\\/| | | |_) |",
-              "  |  _ < |  _ < |  _ < | |  | | |  _ <",
-              "  | |_) || |_) || |_) || |  | | | |_) |",
-              "  |____/ |____/ |____/ |_|  |_| |____/  %D %V, %C",
-              " -----------------------------------------------",
+              "   _     _____     _________        ______ _____",
+              "  | |   / _ \\ \\   / / ____\\ \\      / /  _ \\_   _|",
+              "  | |  | | | \\ \\ / /|  _|  \\ \\ /\\ / /| |_) || |",
+              "  | |__| |_| |\\ V / | |___  \\ V  V / |  _ < | |",
+              "  |_____\\___/  \\_/  |_____|  \\_/\\_/  |_| \\_\\|_|  %D %V, %C",
           ]
           bp = Path("package/base-files/files/etc/banner")
           bp.parent.mkdir(parents=True, exist_ok=True)
           bp.write_text("\n".join(banner_lines) + "\n")
-          # 首次启动将主机名/描述设为 RRWRT
+          # 首次启动将主机名/描述设为 LOVEWRT
           uci_lines = [
               "#!/bin/sh",
-              "uci set system.@system[0].hostname='RRWRT'",
-              "uci set system.@system[0].description='RRWRT'",
+              "uci set system.@system[0].hostname='LOVEWRT'",
+              "uci set system.@system[0].description='LOVEWRT'",
               "uci commit system",
               "exit 0",
           ]
           d = Path("files/etc/uci-defaults")
           d.mkdir(parents=True, exist_ok=True)
-          f = d / "99_rrwrt-brand"
+          f = d / "99_lovewrt-brand"
           f.write_text("\n".join(uci_lines) + "\n")
           f.chmod(0o755)
-          print("Branding applied: RRWRT")
+          print("Branding applied: LOVEWRT")
           PY
 
       - name: Configure x86/64 target (kernel ${{ matrix.kernel_label }})
@@ -247,9 +245,9 @@ jobs:
           # CONFIG_PACKAGE_dnsmasq is not set
           CONFIG_PACKAGE_kmod-tun=y
           CONFIG_VERSIONOPT=y
-          CONFIG_VERSION_DIST="RRWRT"
+          CONFIG_VERSION_DIST="LOVEWRT"
           CONFIG_VERSION_NUMBER="1.0"
-          CONFIG_VERSION_CODE="RRWRT"
+          CONFIG_VERSION_CODE="LOVEWRT"
           EOF
           make defconfig
           echo "Selected target:"
@@ -278,7 +276,7 @@ jobs:
       - name: Upload Actions artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RRWRT-amd64-${{ matrix.kernel_label }}-${{ needs.gate.outputs.tag }}
+          name: LOVEWRT-amd64-${{ matrix.kernel_label }}-${{ needs.gate.outputs.tag }}
           path: bin/targets/x86/64/*
           retention-days: 90
           if-no-files-found: error
@@ -292,8 +290,8 @@ jobs:
           set -euo pipefail
           gh release create "$TAG" \
             --target "${{ github.sha }}" \
-            --title "RRWRT amd64 [${{ matrix.kernel_label }}] $TAG" \
-            --notes "RRWRT x86/64 firmware (kernel ${{ matrix.kernel_label }}, OpenClash built-in), based on Lean's LEDE. Upstream: $UPSTREAM_SHA. Triggered by ${{ github.event_name }} at $(date -u +'%Y-%m-%d %H:%M:%S UTC')." \
+            --title "LOVEWRT amd64 [${{ matrix.kernel_label }}] $TAG" \
+            --notes "LOVEWRT x86/64 firmware (kernel ${{ matrix.kernel_label }}, OpenClash built-in), based on Lean's LEDE. Upstream: $UPSTREAM_SHA. Triggered by ${{ github.event_name }} at $(date -u +'%Y-%m-%d %H:%M:%S UTC')." \
             bin/targets/x86/64/*
 
   finalize:
