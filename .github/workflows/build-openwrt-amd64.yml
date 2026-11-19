@@ -1,4 +1,4 @@
-name: Build OpenWrt amd64 (dual kernel) on upstream changes
+name: Build OpenWrt amd64 (dual kernel + OpenClash) on upstream changes
 
 on:
   schedule:
@@ -19,6 +19,8 @@ jobs:
   gate:
     name: Check upstream changes
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     outputs:
       should_build: ${{ steps.gate.outputs.should_build }}
       upstream_sha: ${{ steps.gate.outputs.upstream_sha }}
@@ -50,6 +52,15 @@ jobs:
           echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
           echo "tag=$(date -u +%Y%m%d-%H%M%S)-${upstream_sha:0:7}" >> "$GITHUB_OUTPUT"
 
+          if [ "$should_build" = "true" ]; then
+            echo "Syncing fork with upstream $upstream_sha ..."
+            curl -fsS -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/merge-upstream" \
+              -d '{"branch":"master"}' || echo "fork sync skipped (non-fatal)"
+          fi
+
   build:
     name: Build x86/64 (kernel ${{ matrix.kernel_label }})
     needs: gate
@@ -65,12 +76,21 @@ jobs:
           - kernel_label: testing-7.3
             testing_kernel: "y"
     steps:
-      - name: Checkout upstream source
+      - name: Checkout fork source
         uses: actions/checkout@v4
         with:
-          repository: coolsnowwolf/lede
-          ref: ${{ needs.gate.outputs.upstream_sha }}
+          repository: ${{ github.repository }}
+          ref: master
           fetch-depth: 1
+
+      - name: Reset source tree to upstream SHA
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/coolsnowwolf/lede.git
+          git fetch --depth 1 upstream ${{ needs.gate.outputs.upstream_sha }}
+          git checkout --force FETCH_HEAD
+          echo "Source reset to upstream ${{ needs.gate.outputs.upstream_sha }}"
+          git rev-parse HEAD
 
       - name: Install build dependencies
         run: |
@@ -138,6 +158,41 @@ jobs:
               p.write_text(s)
           PY
 
+      - name: Add OpenClash (built-in)
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/vernesong/OpenClash.git /tmp/openclash
+          rm -rf package/luci-app-openclash
+          mkdir -p package/luci-app-openclash
+          cp -r /tmp/openclash/luci-app-openclash/. package/luci-app-openclash/
+          rm -rf /tmp/openclash
+          test -f package/luci-app-openclash/Makefile
+          echo "OpenClash source added"
+          grep -E 'PKG_VERSION|PKG_NAME' package/luci-app-openclash/Makefile | head -3
+
+      - name: Harden profiles.json generator
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("scripts/json_overview_image_info.py")
+          s = p.read_text()
+          old = '    default_packages, output["arch_packages"] = run('
+          assert old in s, "generator target line not found"
+          s = s.replace(old, '    _val_lines = run(', 1)
+          tail = '    ).stdout.splitlines()\n'
+          assert tail in s, "generator splitlines tail not found"
+          s = s.replace(
+              tail,
+              '    ).stdout.splitlines()\n'
+              '    default_packages = _val_lines[0] if _val_lines else ""\n'
+              '    output["arch_packages"] = _val_lines[-1] if len(_val_lines) > 1 else ""\n',
+              1,
+          )
+          p.write_text(s)
+          print("patched json_overview_image_info.py")
+          PY
+
       - name: Configure x86/64 target (kernel ${{ matrix.kernel_label }})
         run: |
           set -euo pipefail
@@ -152,14 +207,17 @@ jobs:
           CONFIG_PACKAGE_kmod-virtio-net=y
           CONFIG_PACKAGE_kmod-e1000e=y
           CONFIG_TESTING_KERNEL=${{ matrix.testing_kernel }}
+          CONFIG_PACKAGE_luci-app-openclash=y
+          CONFIG_PACKAGE_luci-compat=y
+          CONFIG_PACKAGE_dnsmasq-full=y
+          # CONFIG_PACKAGE_dnsmasq is not set
+          CONFIG_PACKAGE_kmod-tun=y
           EOF
           make defconfig
           echo "Selected target:"
           grep -E '^CONFIG_TARGET_(x86|x86_64|x86_64_DEVICE_generic)=' .config
-          echo "Selected kernel (TESTING_KERNEL=${{ matrix.testing_kernel }}):"
-          grep -E '^CONFIG_TESTING_KERNEL=' .config || true
-          echo "Effective LINUX_VERSION:"
-          make --no-print-directory -s kernelversion 2>/dev/null || true
+          echo "OpenClash selection:"
+          grep -E '^CONFIG_PACKAGE_luci-app-openclash=' .config || echo "WARNING: OpenClash not selected"
 
       - name: Download packages
         run: |
@@ -195,7 +253,7 @@ jobs:
           gh release create "$TAG" \
             --target "${{ github.sha }}" \
             --title "OpenWrt amd64 [${{ matrix.kernel_label }}] $TAG" \
-            --notes "Automated build of Lean's LEDE x86/64 with kernel ${{ matrix.kernel_label }}. Upstream: $UPSTREAM_SHA. Triggered by ${{ github.event_name }} at $(date -u +'%Y-%m-%d %H:%M:%S UTC')." \
+            --notes "Automated build of Lean's LEDE x86/64 with kernel ${{ matrix.kernel_label }} and OpenClash built-in. Upstream: $UPSTREAM_SHA. Triggered by ${{ github.event_name }} at $(date -u +'%Y-%m-%d %H:%M:%S UTC')." \
             bin/targets/x86/64/*
 
   finalize:
